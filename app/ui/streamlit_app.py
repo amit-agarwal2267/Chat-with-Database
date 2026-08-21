@@ -5,7 +5,9 @@ from app.config import config
 from app.logger import get_logger
 from app.db.connector_factory import get_connector
 from app.health import readiness_check
-from app.errors.exceptions import AppError
+from app.errors.exceptions import (
+    AppError, LLMRateLimitError, LLMServiceUnavailableError, LLMTimeoutError
+)
 from app.core.schema_extraction import extract_schema
 from app.core.agent.graph import build_graph
 
@@ -174,38 +176,52 @@ def render_chat_interface():
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
+        st.session_state.pending_retry_prompt = prompt
+        st.session_state.retry_count = 0
 
-        with st.chat_message("assistant"):
-            try:
-                with st.spinner("Thinking..."):
-                    result = st.session_state.agent_graph.invoke({
-                        "user_query": prompt,
-                        "messages": st.session_state.lc_messages,
-                        "schema": st.session_state.schema,
-                        "db_type": config.DB_TYPE,
+        def run_agent_turn(user_prompt: str):
+            with st.chat_message("assistant"):
+                try:
+                    with st.spinner("Thinking..."):
+                        result = st.session_state.agent_graph.invoke({
+                            "user_query": user_prompt,
+                            "messages": st.session_state.lc_messages,
+                            "schema": st.session_state.schema,
+                            "db_type": config.DB_TYPE,
+                        })
+
+                    response_text = result["final_response"]
+                    st.markdown(response_text)
+
+                    query_result = result.get("query_result")
+                    if query_result:
+                        st.dataframe(query_result, use_container_width=True)
+
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": response_text,
+                        **({"data": query_result} if query_result else {}),
                     })
+                    st.session_state.lc_messages.append(HumanMessage(content=user_prompt))
+                    st.session_state.lc_messages.append(AIMessage(content=response_text))
+                    st.session_state.pop("pending_retry_prompt", None)
+                except (LLMRateLimitError, LLMServiceUnavailableError, LLMTimeoutError) as e:
+                    st.error(f"⚠️ {e.message}")
+                    if st.button("🔄 Retry", key=f"retry_{len(st.session_state.messages)}"):
+                        st.rerun()
 
-                response_text = result["final_response"]
-                st.markdown(response_text)
+                except AppError as e:
+                    st.error(e.message)
+                    st.session_state.pop("pending_retry_prompt", None)
 
-                query_result = result.get("query_result")
-                if query_result:
-                    st.dataframe(query_result, use_container_width=True)
+                except Exception:
+                    logger.exception("Agent execution failed")
+                    st.error("Something went wrong processing that question.")
+                    st.session_state.pop("pending_retry_prompt", None)
 
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": response_text,
-                    **({"data": query_result} if query_result else {}),
-                })
 
-                st.session_state.lc_messages.append(HumanMessage(content=prompt))
-                st.session_state.lc_messages.append(AIMessage(content=response_text))
-
-            except AppError as e:
-                st.error(e.message)
-            except Exception:
-                logger.exception("Agent execution failed")
-                st.error("Something went wrong processing that question.")
+        if "pending_retry_prompt" in st.session_state:
+            run_agent_turn(st.session_state.pending_retry_prompt)
 
 
 def run():

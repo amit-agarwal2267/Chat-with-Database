@@ -28,6 +28,7 @@ def _extract_json(raw: str) -> str:
 def plan_node(state: AgentState) -> AgentState:
     schema_str = json.dumps(state["schema"], indent=2)
     history_str = _format_history(state.get("messages", []))
+    logger.debug("plan_node input | user_query=%r history_turns=%d", state["user_query"], len(state.get("messages", [])))
 
     raw = call_llm(
         system_prompt=prompts.PLANNER_SYSTEM_PROMPT.format(schema=schema_str, history=history_str),
@@ -46,6 +47,7 @@ def plan_node(state: AgentState) -> AgentState:
         raise LLMError("Planner failed to produce a valid decision.") from e
 
     if decision not in ("answerable", "needs_clarification", "out_of_scope"):
+        logger.warning("Planner returned unexpected decision '%s' — defaulting to needs_clarification", decision)
         decision = "needs_clarification"
 
     logger.info("Plan decision: %s | reasoning: %s", decision, reasoning)
@@ -100,11 +102,15 @@ def generate_sql_node(state: AgentState) -> AgentState:
 
 
 def execute_sql_node(state: AgentState, connector) -> AgentState:
+    logger.debug("Executing SQL: %s", state["generated_sql"])
     try:
         results = connector.execute_query(state["generated_sql"])
+        logger.info("Query executed successfully | rows_returned=%d", len(results))
+        if not results:
+            logger.warning("Query executed but returned 0 rows")
         return {**state, "query_result": results, "query_error": None}
     except DBQueryError as e:
-        logger.warning("Query execution failed: %s", e.message)
+        logger.error("Query execution failed: %s | sql=%s", e.message, state["generated_sql"])
         return {**state, "query_result": None, "query_error": e.message}
 
 
