@@ -11,18 +11,23 @@ FORBIDDEN_KEYWORDS = ("insert", "update", "delete", "drop", "alter", "truncate",
 
 
 def _extract_json(raw: str) -> str:
-    """
-    NIM models sometimes wrap JSON in prose or code fences despite instructions —
-    strip fences and slice out the outermost {...} block defensively.
-    """
     raw = raw.strip()
     if raw.startswith("```"):
         raw = raw.strip("`").removeprefix("json").strip()
-
     start, end = raw.find("{"), raw.rfind("}")
     if start != -1 and end != -1:
         raw = raw[start:end + 1]
     return raw
+
+
+def _format_history(messages: list) -> str:
+    if not messages:
+        return "(no prior conversation)"
+    lines = []
+    for m in messages[-10:]:
+        role = "User" if m.type == "human" else "Assistant"
+        lines.append(f"{role}: {m.content}")
+    return "\n".join(lines)
 
 
 def plan_node(state: AgentState) -> AgentState:
@@ -57,6 +62,7 @@ def plan_node(state: AgentState) -> AgentState:
 def clarify_node(state: AgentState) -> AgentState:
     schema_str = json.dumps(state["schema"], indent=2)
     history_str = _format_history(state.get("messages", []))
+    logger.debug("clarify_node | query=%r", state["user_query"])
 
     question = call_llm(
         system_prompt="You write concise clarifying questions, aware of prior conversation.",
@@ -64,11 +70,13 @@ def clarify_node(state: AgentState) -> AgentState:
             schema=schema_str, history=history_str, user_query=state["user_query"]
         ),
     )
+    logger.info("Clarification requested: %s", question)
     return {**state, "clarification_question": question, "final_response": question}
 
 
 def out_of_scope_node(state: AgentState) -> AgentState:
     schema_str = json.dumps(state["schema"], indent=2)
+    logger.info("Query classified out_of_scope | query=%r", state["user_query"])
     response = call_llm(
         system_prompt="You explain data limitations clearly and briefly.",
         user_prompt=prompts.OUT_OF_SCOPE_PROMPT.format(
@@ -85,19 +93,17 @@ def generate_sql_node(state: AgentState) -> AgentState:
     sql = call_llm(
         system_prompt="You write precise, safe, read-only SQL queries.",
         user_prompt=prompts.SQL_GENERATION_PROMPT.format(
-            dialect=state["db_type"],
-            schema=schema_str,
-            history=history_str,
-            user_query=state["user_query"],
+            dialect=state["db_type"], schema=schema_str, history=history_str, user_query=state["user_query"],
         ),
     )
     sql = sql.strip().strip("`").removeprefix("sql").strip()
 
     lowered = sql.lower()
     if any(kw in lowered for kw in FORBIDDEN_KEYWORDS):
+        logger.error("Blocked unsafe generated SQL: %s", sql)
         raise DBQueryError("Generated query attempted a non-read-only operation and was blocked.")
 
-    logger.info("Generated SQL: %s", sql)
+    logger.info("Generated SQL (%s): %s", state["db_type"], sql)
     return {**state, "generated_sql": sql}
 
 
@@ -116,6 +122,7 @@ def execute_sql_node(state: AgentState, connector) -> AgentState:
 
 def generate_response_node(state: AgentState) -> AgentState:
     if state.get("query_error"):
+        logger.warning("Synthesizing error response for user | error=%s", state["query_error"])
         response = (
             f"I tried to run that query but it failed: {state['query_error']}. "
             "Could you rephrase your question?"
@@ -123,20 +130,12 @@ def generate_response_node(state: AgentState) -> AgentState:
         return {**state, "final_response": response}
 
     result_str = json.dumps(state["query_result"], indent=2, default=str)
+    logger.debug("Synthesizing response from %d result rows", len(state["query_result"] or []))
     response = call_llm(
         system_prompt="You explain data results clearly in plain language.",
         user_prompt=prompts.RESPONSE_SYNTHESIS_PROMPT.format(
             user_query=state["user_query"], query_result=result_str
         ),
     )
+    logger.info("Response generated | length=%d chars", len(response))
     return {**state, "final_response": response}
-
-
-def _format_history(messages: list) -> str:
-    if not messages:
-        return "(no prior conversation)"
-    lines = []
-    for m in messages[-10:]: 
-        role = "User" if m.type == "human" else "Assistant"
-        lines.append(f"{role}: {m.content}")
-    return "\n".join(lines)

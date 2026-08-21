@@ -23,10 +23,13 @@ class SQLiteConnector(SQLConnector):
         if self._conn:
             try:
                 self._conn.close()
+                logger.info("Disconnected from SQLite DB '%s'", config.DB_NAME)
             except sqlite3.Error as e:
                 logger.warning("Error closing SQLite connection: %s", e)
             finally:
                 self._conn = None
+        else:
+            logger.debug("disconnect() called with no active connection")
 
     def execute_query(self, sql: str, params=None) -> list[dict]:
         if not self._conn:
