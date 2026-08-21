@@ -1,0 +1,25 @@
+[project]
+name = "text-to-sql"
+version = "0.1.0"
+description = "AI-powered data analyst: chat with your data, generate SQL, and analyze results"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+    { name = "Amit Agarwal", email = "dev.amitagarwal@gmail.com" }
+]
+dependencies = [
+    "oracledb>=4.0.2",
+    "pandas>=3.0.5",
+    "pymysql>=1.2.0",
+    "pytest>=9.1.1",
+    "pytest-mock>=3.15.1",
+    "python-dotenv>=1.2.3",
+    "streamlit>=1.62.0",
+]
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-mock>=3.15.1",
+]
+
