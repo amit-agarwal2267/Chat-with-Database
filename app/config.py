@@ -54,6 +54,10 @@ class Config:
         return float(self._get("LLM_TEMPERATURE", "0.2"))
 
     @property
+    def LLM_BASE_URL(self) -> str:
+        return self._get("LLM_BASE_URL", "")
+
+    @property
     def DB_TYPE(self) -> str:
         return self._get("DB_TYPE", "sqlite")
 

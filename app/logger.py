@@ -23,6 +23,9 @@ def setup_logging():
     root.handlers.clear()
     root.addHandler(handler)
 
+    for noisy in ("httpx", "httpcore", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
     _configured = True
 
 

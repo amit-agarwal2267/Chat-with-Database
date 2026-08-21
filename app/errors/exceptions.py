@@ -26,6 +26,21 @@ class LLMError(AppError):
     """Raised when the LLM call fails or returns an unusable response."""
 
 
+class LLMRateLimitError(LLMError):
+    """Raised on HTTP 429 — API key hit its rate limit. Retryable."""
+    retryable = True
+
+
+class LLMServiceUnavailableError(LLMError):
+    """Raised on HTTP 503 — provider overloaded/down. Retryable."""
+    retryable = True
+
+
+class LLMTimeoutError(LLMError):
+    """Raised when the LLM call times out. Retryable."""
+    retryable = True
+
+
 class DBConnectionError(AppError):
     """Raised when a database connection cannot be established."""
 

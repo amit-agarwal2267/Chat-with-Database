@@ -1,9 +1,15 @@
 import streamlit as st
+from langchain_core.messages import HumanMessage, AIMessage
+
 from app.config import config
 from app.logger import get_logger
 from app.db.connector_factory import get_connector
 from app.health import readiness_check
-from app.errors.exceptions import AppError
+from app.errors.exceptions import (
+    AppError, LLMRateLimitError, LLMServiceUnavailableError, LLMTimeoutError
+)
+from app.core.schema_extraction import extract_schema
+from app.core.agent.graph import build_graph
 
 logger = get_logger(__name__)
 
@@ -99,10 +105,18 @@ def render_connection_form():
                     connector.connect()
                     tables = connector.list_tables()
 
+                    # Build a combined schema dict across all tables for the agent's planner/SQL prompts
+                    schema = {"tables": {}}
+                    for table in tables:
+                        schema["tables"][table] = connector.get_schema(table)
+
                 st.session_state.connector = connector
                 st.session_state.connected = True
                 st.session_state.tables = tables
+                st.session_state.schema = schema
                 st.session_state.messages = []
+                st.session_state.lc_messages = []
+                st.session_state.agent_graph = build_graph(connector)
 
                 logger.info("Connected to %s DB with %d tables", db_type, len(tables))
                 st.rerun()
@@ -162,21 +176,52 @@ def render_chat_interface():
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
+        st.session_state.pending_retry_prompt = prompt
+        st.session_state.retry_count = 0
 
-        with st.chat_message("assistant"):
-            try:
-                with st.spinner("Thinking..."):
-                    pass
-                st.warning("Text-to-SQL generation not wired up yet — placeholder response.")
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": "Text-to-SQL generation not wired up yet.",
-                })
-            except AppError as e:
-                st.error(e.message)
-            except Exception:
-                logger.exception("Query failed")
-                st.error("Something went wrong running that query.")
+        def run_agent_turn(user_prompt: str):
+            with st.chat_message("assistant"):
+                try:
+                    with st.spinner("Thinking..."):
+                        result = st.session_state.agent_graph.invoke({
+                            "user_query": user_prompt,
+                            "messages": st.session_state.lc_messages,
+                            "schema": st.session_state.schema,
+                            "db_type": config.DB_TYPE,
+                        })
+
+                    response_text = result["final_response"]
+                    st.markdown(response_text)
+
+                    query_result = result.get("query_result")
+                    if query_result:
+                        st.dataframe(query_result, use_container_width=True)
+
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": response_text,
+                        **({"data": query_result} if query_result else {}),
+                    })
+                    st.session_state.lc_messages.append(HumanMessage(content=user_prompt))
+                    st.session_state.lc_messages.append(AIMessage(content=response_text))
+                    st.session_state.pop("pending_retry_prompt", None)
+                except (LLMRateLimitError, LLMServiceUnavailableError, LLMTimeoutError) as e:
+                    st.error(f"⚠️ {e.message}")
+                    if st.button("🔄 Retry", key=f"retry_{len(st.session_state.messages)}"):
+                        st.rerun()
+
+                except AppError as e:
+                    st.error(e.message)
+                    st.session_state.pop("pending_retry_prompt", None)
+
+                except Exception:
+                    logger.exception("Agent execution failed")
+                    st.error("Something went wrong processing that question.")
+                    st.session_state.pop("pending_retry_prompt", None)
+
+
+        if "pending_retry_prompt" in st.session_state:
+            run_agent_turn(st.session_state.pending_retry_prompt)
 
 
 def run():
